@@ -1,0 +1,64 @@
+## @ Import the AWS Glue libraries, pySpark we'll need 
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql.functions import *
+from awsglue.dynamicframe import DynamicFrame
+
+## @ set up a single GlueContext.
+sc = SparkContext.getOrCreate()
+
+glueContext = GlueContext(sc)
+
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init('serverless-datalake-immersionday-exercise1')
+
+## @ create the Glue DynamicFrame from table schema. A DynamicFrame is similar to a DataFrame, except that each record is 
+## @ self-describing, so no schema is required initially.
+useractivity = glueContext.create_dynamic_frame.from_catalog(database = "weblogs", table_name = "live", transformation_ctx = "useractivity")
+
+## @ ApplyMapping is one of the built in transforms that maps source columns and data types from a DynamicFrame to target columns 
+## @ and data types in a returned DynamicFrame. You specify the mapping argument, which is a list of tuples that contain source column,
+## @ source type, target column, and target type.
+useractivityApplyMapping = ApplyMapping.apply(frame = useractivity, mappings = [("ip_address", "string", "ip_address", "string"), ("username", "string", "username", "string"), ("timestamp", "string", "timestamp", "string"), ("request", "string", "request", "string"), ("http", "long", "http", "long"), ("bytes", "long", "bytes", "long")], transformation_ctx = "applymapping1")
+
+## @ ResolveChoice is another built in transform that you can use to specify how a column should be handled when it contains values of 
+## @ multiple types. You can choose to either cast the column to a single data type, discard one or more of the types, or retain all 
+## @ types in either separate columns or a structure. You can select a different resolution policy for each column or specify a global 
+## @ policy that is applied to all columns.
+resolvechoice2 = ResolveChoice.apply(frame = useractivityApplyMapping, choice = "make_struct", transformation_ctx = "resolvechoice2")
+
+## @ DropNullFields transform removes null fields from a DynamicFrame. The output DynamicFrame does not contain fields of the null type
+## @ in the schema.
+useractivity = DropNullFields.apply(frame = resolvechoice2, transformation_ctx = "dropnullfields3")
+
+## @ We will leverage PySpark functions to manipulate our data, starting with converting glue DynamicFrame to DataFrame
+dataframe0 = DynamicFrame.toDF(useractivity)
+
+## @ Use PySpark functions to split request columns on '/' 
+split_column = split(dataframe0['request'], '/')
+
+dataframe0 = dataframe0.withColumn('requesttype', split_column.getItem(0))
+
+dataframe0 = dataframe0.withColumn('topdomain', split_column.getItem(1))
+dataframe0 = dataframe0.withColumn('toppage', split_column.getItem(2))
+dataframe0 = dataframe0.withColumn('subpage', split_column.getItem(3))
+
+## @ split timestamp column into date, time, year and month
+dataframe0 = dataframe0.withColumn('date',date_format(from_unixtime(unix_timestamp('timestamp', 'd/MMM/yyyy:HH:mm:ss')), 'MM/dd/yyy'))
+dataframe0 = dataframe0.withColumn('time',date_format(from_unixtime(unix_timestamp('timestamp', 'd/MMM/yyyy:HH:mm:ss')), 'HH:mm:ss'))
+
+dataframe0 = dataframe0.withColumn('year', year(from_unixtime(unix_timestamp('timestamp', 'd/MMM/yyyy:HH:mm:ss'))))
+dataframe0 = dataframe0.withColumn('month', month(from_unixtime(unix_timestamp('timestamp', 'd/MMM/yyyy:HH:mm:ss'))))
+
+
+## @ convert dataframe to glue DynamicFrame and write the output in Parquet format partitioned on toppage column
+useractivity = DynamicFrame.fromDF(dataframe0, glueContext, "name1")
+
+writeUseractivityToS3 = glueContext.write_dynamic_frame.from_options(frame = useractivity, connection_type = "s3", connection_options = {"path": 's3://serverless-datalake-immersionday-ingestionbucket-1iimxqspkuq5u/weblogs/useractivityliveconverted', "partitionKeys" :["toppage"]}, format = "parquet", transformation_ctx = "writeUseractivityToS3")
+
+job.commit()
